@@ -1,554 +1,243 @@
 import { expect } from "chai";
-import { network } from "hardhat";
+import hre from "hardhat";
+import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
+import { OWNER_ADDRESS, parseEther } from "./helpers";
 
-const { ethers, networkHelpers } = await network.connect();
+const { ethers } = hre;
 
 describe("PairVaultFactory", function () {
-  let cfxToken: any;
-  let mockOracle: any;
-  let factory: any;
-  let tokenA: any;
-  let tokenB: any;
-  let owner: any;
-  let user1: any;
-  let user2: any;
-  let treasury: any;
-  let ownerSigner: any;
-  
-  const OWNER_ADDRESS = "0x5E66Dd4d6FCce965E8F55Cc0D8749badA0D9a329";
-  const DEFAULT_LOGO_URI = "ipfs://defaultlogo123";
-  const PRICE_TOKEN_A = 1n * 10n ** 18n; // $1
-  const PRICE_TOKEN_B = 2n * 10n ** 18n; // $2
-
-  beforeEach(async function () {
-    [owner, user1, user2, treasury] = await ethers.getSigners();
+  async function deployFactoryFixture() {
+    const [owner, user1] = await ethers.getSigners();
     
-    // Impersonate owner account and fund it
-    await networkHelpers.impersonateAccount(OWNER_ADDRESS);
-    await networkHelpers.setBalance(OWNER_ADDRESS, ethers.parseEther("10000"));
-    ownerSigner = await ethers.getSigner(OWNER_ADDRESS);
+    // Deploy CFX token
+    const CFXTokenFactory = await ethers.getContractFactory("CFXToken");
+    const cfxToken = await CFXTokenFactory.deploy("ipfs://cfx");
     
-    // Deploy CFX Token
-    cfxToken = await ethers.deployContract("CFXToken", ["ipfs://cfxlogo"]);
+    // Deploy oracle
+    const SimpleOracleRouterFactory = await ethers.getContractFactory("SimpleOracleRouter");
+    const oracle = await SimpleOracleRouterFactory.deploy();
     
-    // Deploy Mock Oracle
-    mockOracle = await ethers.deployContract("MockOracle");
+    // Deploy mock tokens
+    const MockERC20Factory = await ethers.getContractFactory("MockERC20");
+    const tokenA = await MockERC20Factory.deploy("TokenA", "TKA", 18);
+    const tokenB = await MockERC20Factory.deploy("TokenB", "TKB", 18);
     
-    // Deploy Factory
-    factory = await ethers.deployContract("PairVaultFactory", [
-      await cfxToken.getAddress(),
-      await mockOracle.getAddress(),
-      treasury.address,
-      DEFAULT_LOGO_URI
-    ]);
+    // Deploy mock chainlink feeds
+    const MockChainlinkFeedFactory = await ethers.getContractFactory("MockChainlinkFeed");
+    const feedA = await MockChainlinkFeedFactory.deploy(8, ethers.parseEther("1").toString());
+    const feedB = await MockChainlinkFeedFactory.deploy(8, ethers.parseEther("2").toString());
     
-    // Deploy mock ERC20 tokens for testing
-    tokenA = await ethers.deployContract("MockERC20", ["Token A", "TKA", 18]);
-    tokenB = await ethers.deployContract("MockERC20", ["Token B", "TKB", 18]);
+    // Add feeds to oracle
+    await oracle.addChainlinkFeed(tokenA.target, feedA.target);
+    await oracle.addChainlinkFeed(tokenB.target, feedB.target);
     
-    // Set prices in oracle
-    await mockOracle.setPrice(await tokenA.getAddress(), PRICE_TOKEN_A);
-    await mockOracle.setPrice(await tokenB.getAddress(), PRICE_TOKEN_B);
+    // Deploy implementations
+    const PETTokenFactory = await ethers.getContractFactory("PETToken");
+    const petTokenImpl = await PETTokenFactory.deploy();
     
-    // Give user1 some CFX tokens
-    await cfxToken.connect(ownerSigner).transfer(user1.address, 100000n * 10n ** 18n);
-  });
+    const UniversalPairVaultFactory = await ethers.getContractFactory("UniversalPairVault");
+    const vaultImpl = await UniversalPairVaultFactory.deploy();
+    
+    // Deploy factory
+    const PairVaultFactoryFactory = await ethers.getContractFactory("PairVaultFactory");
+    const factory = await PairVaultFactoryFactory.deploy(
+      cfxToken.target,
+      oracle.target,
+      petTokenImpl.target,
+      vaultImpl.target,
+      "ipfs://default"
+    );
+    
+    return { factory, cfxToken, oracle, tokenA, tokenB, petTokenImpl, vaultImpl, owner, user1 };
+  }
 
   describe("Deployment", function () {
-    it("Should set correct CFX token address", async function () {
-      expect(await factory.cfxToken()).to.equal(await cfxToken.getAddress());
-    });
-
-    it("Should set correct oracle address", async function () {
-      expect(await factory.oracle()).to.equal(await mockOracle.getAddress());
-    });
-
-    it("Should set correct owner", async function () {
+    it("Should deploy with correct parameters", async function () {
+      const { factory, cfxToken, oracle, petTokenImpl, vaultImpl } = await loadFixture(deployFactoryFixture);
+      
+      expect(await factory.cfxToken()).to.equal(cfxToken.target);
+      expect(await factory.oracle()).to.equal(oracle.target);
+      expect(await factory.petTokenImplementation()).to.equal(petTokenImpl.target);
+      expect(await factory.vaultImplementation()).to.equal(vaultImpl.target);
       expect(await factory.owner()).to.equal(OWNER_ADDRESS);
+      expect(await factory.defaultPETLogoURI()).to.equal("ipfs://default");
     });
 
-    it("Should set correct treasury", async function () {
-      expect(await factory.treasury()).to.equal(treasury.address);
-    });
-
-    it("Should set default PET logo URI", async function () {
-      expect(await factory.defaultPETLogoURI()).to.equal(DEFAULT_LOGO_URI);
+    it("Should revert on zero address in constructor", async function () {
+      const { cfxToken, oracle, petTokenImpl, vaultImpl } = await loadFixture(deployFactoryFixture);
+      
+      const PairVaultFactoryFactory = await ethers.getContractFactory("PairVaultFactory");
+      
+      await expect(
+        PairVaultFactoryFactory.deploy(
+          ethers.ZeroAddress,
+          oracle.target,
+          petTokenImpl.target,
+          vaultImpl.target,
+          "ipfs://default"
+        )
+      ).to.be.revertedWithCustomError(PairVaultFactoryFactory, "ZeroAddress");
     });
   });
 
-  describe("Create Vault", function () {
-    it("Should create a new vault for token pair", async function () {
-      const tx = await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
+  describe("Vault Creation", function () {
+    it("Should create vault for token pair", async function () {
+      const { factory, tokenA, tokenB } = await loadFixture(deployFactoryFixture);
       
-      const receipt = await tx.wait();
-      const event = receipt.logs.find((log: any) => {
-        try {
-          const parsed = factory.interface.parseLog(log);
-          return parsed && parsed.name === "VaultCreated";
-        } catch {
-          return false;
-        }
-      });
+      await expect(factory.createVault(tokenA.target, tokenB.target))
+        .to.emit(factory, "VaultCreated");
       
-      expect(event).to.not.be.undefined;
-      
-      // Check vault exists
-      const vaultAddress = await factory.getVaultForPair(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-      expect(vaultAddress).to.not.equal(ethers.ZeroAddress);
+      const vault = await factory.getVault(tokenA.target, tokenB.target);
+      expect(vault).to.not.equal(ethers.ZeroAddress);
     });
 
-    it("Should set PET token logo URI from default", async function () {
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
+    it("Should create vault with reversed token order", async function () {
+      const { factory, tokenA, tokenB } = await loadFixture(deployFactoryFixture);
       
-      const vaultAddress = await factory.getVaultForPair(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
+      await factory.createVault(tokenA.target, tokenB.target);
+      const vault1 = await factory.getVault(tokenA.target, tokenB.target);
       
-      const vaultInfo = await factory.getVaultDetails(vaultAddress);
+      await factory.createVault(tokenB.target, tokenA.target);
+      const vault2 = await factory.getVault(tokenB.target, tokenA.target);
+      
+      // Should return same vault
+      expect(vault1).to.equal(vault2);
+    });
+
+    it("Should initialize PET token correctly", async function () {
+      const { factory, tokenA, tokenB } = await loadFixture(deployFactoryFixture);
+      
+      await factory.createVault(tokenA.target, tokenB.target);
+      const vault = await factory.getVault(tokenA.target, tokenB.target);
+      
+      const vaultInfo = await factory.getVaultDetails(vault);
       const petToken = await ethers.getContractAt("PETToken", vaultInfo.petToken);
       
-      expect(await petToken.logoURI()).to.equal(DEFAULT_LOGO_URI);
+      expect(await petToken.name()).to.include("PET-");
+      expect(await petToken.symbol()).to.include("PET-");
+      expect(await petToken.vault()).to.equal(vault);
     });
 
-    it("Should revert when creating vault with same token", async function () {
-      await expect(
-        factory.connect(user1).createVault(
-          await tokenA.getAddress(),
-          await tokenA.getAddress()
-        )
-      ).to.be.revertedWith("Same token");
+    it("Should initialize vault correctly", async function () {
+      const { factory, cfxToken, tokenA, tokenB, oracle } = await loadFixture(deployFactoryFixture);
+      
+      await factory.createVault(tokenA.target, tokenB.target);
+      const vault = await factory.getVault(tokenA.target, tokenB.target);
+      
+      const vaultContract = await ethers.getContractAt("UniversalPairVault", vault);
+      
+      expect(await vaultContract.cfxToken()).to.equal(cfxToken.target);
+      expect(await vaultContract.token0()).to.equal(tokenA.target);
+      expect(await vaultContract.token1()).to.equal(tokenB.target);
+      expect(await vaultContract.oracle()).to.equal(oracle.target);
     });
 
-    it("Should revert when creating vault with zero address", async function () {
-      await expect(
-        factory.connect(user1).createVault(
-          ethers.ZeroAddress,
-          await tokenA.getAddress()
-        )
-      ).to.be.revertedWith("Zero address");
+    it("Should add vault to allVaults array", async function () {
+      const { factory, tokenA, tokenB } = await loadFixture(deployFactoryFixture);
+      
+      const lengthBefore = await factory.allVaultsLength();
+      
+      await factory.createVault(tokenA.target, tokenB.target);
+      
+      const lengthAfter = await factory.allVaultsLength();
+      expect(lengthAfter).to.equal(lengthBefore + 1n);
+      
+      const allVaults = await factory.getAllVaults();
+      expect(allVaults.length).to.equal(1);
     });
 
-    it("Should revert when creating duplicate vault", async function () {
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
+    it("Should store vault info correctly", async function () {
+      const { factory, tokenA, tokenB, user1 } = await loadFixture(deployFactoryFixture);
       
-      await expect(
-        factory.connect(user1).createVault(
-          await tokenA.getAddress(),
-          await tokenB.getAddress()
-        )
-      ).to.be.revertedWith("Vault exists");
+      await factory.connect(user1).createVault(tokenA.target, tokenB.target);
+      const vault = await factory.getVault(tokenA.target, tokenB.target);
+      
+      const vaultInfo = await factory.getVaultDetails(vault);
+      
+      expect(vaultInfo.token0).to.equal(tokenA.target);
+      expect(vaultInfo.token1).to.equal(tokenB.target);
+      expect(vaultInfo.creator).to.equal(user1.address);
+      expect(vaultInfo.createdAt).to.be.gt(0);
+      expect(vaultInfo.petToken).to.not.equal(ethers.ZeroAddress);
     });
 
-    it("Should revert when oracle has no price for token0", async function () {
-      const tokenC = await ethers.deployContract("MockERC20", ["Token C", "TKC", 18]);
+    it("Should revert when same token pair", async function () {
+      const { factory, tokenA } = await loadFixture(deployFactoryFixture);
       
-      await expect(
-        factory.connect(user1).createVault(
-          await tokenC.getAddress(),
-          await tokenB.getAddress()
-        )
-      ).to.be.revertedWith("No price for token0");
+      await expect(factory.createVault(tokenA.target, tokenA.target))
+        .to.be.revertedWithCustomError(factory, "SameToken");
     });
 
-    it("Should revert when oracle has no price for token1", async function () {
-      const tokenC = await ethers.deployContract("MockERC20", ["Token C", "TKC", 18]);
-      await mockOracle.setPrice(await tokenC.getAddress(), PRICE_TOKEN_A);
+    it("Should revert when zero address", async function () {
+      const { factory, tokenA } = await loadFixture(deployFactoryFixture);
       
-      // Create vault with C and B - both have prices so this should succeed
-      // If C < B then C is token0, if B < C then B is token0
-      // Since both have prices set in oracle, vault creation should succeed
-      await expect(
-        factory.connect(user1).createVault(
-          await tokenC.getAddress(),
-          await tokenB.getAddress()
-        )
-      ).to.emit(factory, "VaultCreated"); // This should work since both have prices
-      
-      // Test with a token without price
-      // Since addresses are sorted, we need token without price to be token1
-      // So we'll use tokenB (has price) first, then tokenD (no price) second
-      // After sorting, tokenB < tokenD, so tokenB is token0 (has price) and tokenD is token1 (no price)
-      const tokenD = await ethers.deployContract("MockERC20", ["Token D", "TKD", 18]);
-      await expect(
-        factory.connect(user1).createVault(
-          await tokenB.getAddress(), // Has price, will be token0
-          await tokenD.getAddress()   // No price, will be token1
-        )
-      ).to.be.revertedWith("No price for token1");
+      await expect(factory.createVault(ethers.ZeroAddress, tokenA.target))
+        .to.be.revertedWithCustomError(factory, "ZeroAddress");
     });
 
-    it("Should create vault with correct token ordering", async function () {
-      // Use new tokens to avoid conflicts with previous tests
-      const tokenX = await ethers.deployContract("MockERC20", ["Token X", "TKX", 18]);
-      const tokenY = await ethers.deployContract("MockERC20", ["Token Y", "TKY", 18]);
-      await mockOracle.setPrice(await tokenX.getAddress(), PRICE_TOKEN_A);
-      await mockOracle.setPrice(await tokenY.getAddress(), PRICE_TOKEN_B);
+    it("Should revert when vault already exists", async function () {
+      const { factory, tokenA, tokenB } = await loadFixture(deployFactoryFixture);
       
-      // Create vault with Y first, then X (to test ordering)
-      await factory.connect(user1).createVault(
-        await tokenY.getAddress(), 
-        await tokenX.getAddress()
-      );
+      await factory.createVault(tokenA.target, tokenB.target);
       
-      const vaultAddress = await factory.getVaultForPair(
-        await tokenX.getAddress(),
-        await tokenY.getAddress()
-      );
-      const vaultInfo = await factory.getVaultDetails(vaultAddress);
-      
-      // token0 should be the smaller address (X < Y typically)
-      const tokenXAddr = (await tokenX.getAddress()).toLowerCase();
-      const tokenYAddr = (await tokenY.getAddress()).toLowerCase();
-      
-      // Determine which is smaller
-      const smallerAddr = tokenXAddr < tokenYAddr ? tokenXAddr : tokenYAddr;
-      const largerAddr = tokenXAddr < tokenYAddr ? tokenYAddr : tokenXAddr;
-      
-      expect(vaultInfo.token0.toLowerCase()).to.equal(smallerAddr);
-      expect(vaultInfo.token1.toLowerCase()).to.equal(largerAddr);
+      await expect(factory.createVault(tokenA.target, tokenB.target))
+        .to.be.revertedWithCustomError(factory, "VaultExists");
     });
 
-    it("Should increment vault count", async function () {
-      expect(await factory.allVaultsLength()).to.equal(0);
+    it("Should revert when no price source", async function () {
+      const { factory } = await loadFixture(deployFactoryFixture);
       
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
+      const MockERC20Factory = await ethers.getContractFactory("MockERC20");
+      const tokenC = await MockERC20Factory.deploy("TokenC", "TKC", 18);
+      const tokenD = await MockERC20Factory.deploy("TokenD", "TKD", 18);
       
-      expect(await factory.allVaultsLength()).to.equal(1);
-    });
-
-    it("Should store vault creator", async function () {
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-      
-      const vaultAddress = await factory.getVaultForPair(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-      const vaultInfo = await factory.getVaultDetails(vaultAddress);
-      
-      expect(vaultInfo.creator.toLowerCase()).to.equal(user1.address.toLowerCase());
-    });
-  });
-
-  describe("Vault Operations", function () {
-    let vaultAddress: string;
-    let vault: any;
-    let petToken: any;
-
-    beforeEach(async function () {
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-      
-      vaultAddress = await factory.getVaultForPair(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-      
-      vault = await ethers.getContractAt("UniversalPairVault", vaultAddress);
-      
-      const vaultInfo = await factory.getVaultDetails(vaultAddress);
-      petToken = await ethers.getContractAt("PETToken", vaultInfo.petToken);
-    });
-
-    it("Should allow deposit to vault", async function () {
-      const depositAmount = 1000n * 10n ** 18n;
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount);
-      
-      const tx = await vault.connect(user1).deposit(depositAmount, 0);
-      const receipt = await tx.wait();
-      
-      // Check PET tokens were minted
-      const petBalance = await petToken.balanceOf(user1.address);
-      expect(petBalance).to.be.gt(0);
-    });
-
-    it("Should calculate deposit output correctly", async function () {
-      const depositAmount = 1000n * 10n ** 18n;
-      const output = await vault.calculateDepositOutput(depositAmount);
-      
-      // First deposit should return close to deposit amount (minus fee)
-      expect(output).to.be.gt(0);
-      expect(output).to.be.lt(depositAmount);
-    });
-
-    it("Should allow redeem from vault", async function () {
-      const depositAmount = 10000n * 10n ** 18n; // Increased to ensure vault has enough
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount * 2n);
-      await vault.connect(user1).deposit(depositAmount, 0);
-      
-      // Wait a moment for potential price updates
-      await networkHelpers.time.increase(1);
-      
-      const petBalance = await petToken.balanceOf(user1.address);
-      const expectedOutput = await vault.calculateRedeemOutput(petBalance);
-      
-      // Make sure vault has enough CFX - deposit more if needed
-      const vaultBalance = await cfxToken.balanceOf(vaultAddress);
-      if (vaultBalance < expectedOutput) {
-        const additionalNeeded = expectedOutput - vaultBalance + 1000n * 10n ** 18n;
-        await cfxToken.connect(ownerSigner).transfer(vaultAddress, additionalNeeded);
-      }
-      
-      await petToken.connect(user1).approve(vaultAddress, petBalance);
-      
-      const initialBalance = await cfxToken.balanceOf(user1.address);
-      const tx = await vault.connect(user1).redeem(petBalance, 0);
-      const receipt = await tx.wait();
-      
-      // User should get CFX back (minus fees)
-      const finalBalance = await cfxToken.balanceOf(user1.address);
-      expect(finalBalance).to.be.gt(initialBalance);
-    });
-
-    it("Should calculate NAV correctly", async function () {
-      const nav = await vault.getCurrentNAV();
-      // NAV should be average of token prices: (PRICE_TOKEN_A + PRICE_TOKEN_B) / 2
-      const expectedNav = (PRICE_TOKEN_A + PRICE_TOKEN_B) >> 1n;
-      expect(nav).to.equal(expectedNav);
-    });
-
-    it("Should respect slippage protection on deposit", async function () {
-      const depositAmount = 1000n * 10n ** 18n;
-      const actualOutput = await vault.calculateDepositOutput(depositAmount);
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount);
-      
-      // Should fail if minPETOut is too high
-      await expect(
-        vault.connect(user1).deposit(depositAmount, actualOutput + 1n)
-      ).to.be.revertedWith("Slippage");
-    });
-
-    it("Should respect slippage protection on redeem", async function () {
-      const depositAmount = 1000n * 10n ** 18n;
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount);
-      await vault.connect(user1).deposit(depositAmount, 0);
-      
-      const petBalance = await petToken.balanceOf(user1.address);
-      const actualOutput = await vault.calculateRedeemOutput(petBalance);
-      
-      await petToken.connect(user1).approve(vaultAddress, petBalance);
-      
-      // Should fail if minCFXOut is too high
-      await expect(
-        vault.connect(user1).redeem(petBalance, actualOutput + 1n)
-      ).to.be.revertedWith("Slippage");
-    });
-
-    it("Should handle pause functionality", async function () {
-      const depositAmount = 1000n * 10n ** 18n;
-      
-      // Pause vault
-      await vault.connect(ownerSigner).setPaused(true);
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount);
-      
-      await expect(
-        vault.connect(user1).deposit(depositAmount, 0)
-      ).to.be.revertedWith("Paused");
-    });
-
-    it("Should charge fees on deposit", async function () {
-      const depositAmount = 10000n * 10n ** 18n;
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount);
-      await vault.connect(user1).deposit(depositAmount, 0);
-      
-      const treasuryPETBalance = await petToken.balanceOf(treasury.address);
-      expect(treasuryPETBalance).to.be.gt(0);
-    });
-
-    it("Should charge fees on redeem", async function () {
-      const depositAmount = 100000n * 10n ** 18n; // Increased significantly
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount * 3n);
-      await vault.connect(user1).deposit(depositAmount, 0);
-      
-      // Wait a moment
-      await networkHelpers.time.increase(1);
-      
-      const treasuryCfxBefore = await cfxToken.balanceOf(treasury.address);
-      const petBalance = await petToken.balanceOf(user1.address);
-      const expectedOutput = await vault.calculateRedeemOutput(petBalance);
-      
-      // Ensure vault has enough CFX to cover redemption
-      const vaultBalance = await cfxToken.balanceOf(vaultAddress);
-      if (vaultBalance < expectedOutput) {
-        const additionalNeeded = expectedOutput - vaultBalance + 10000n * 10n ** 18n;
-        await cfxToken.connect(ownerSigner).transfer(vaultAddress, additionalNeeded);
-      }
-      
-      await petToken.connect(user1).approve(vaultAddress, petBalance);
-      await vault.connect(user1).redeem(petBalance, 0);
-      
-      const treasuryCfxAfter = await cfxToken.balanceOf(treasury.address);
-      expect(treasuryCfxAfter).to.be.gt(treasuryCfxBefore);
-    });
-  });
-
-  describe("Admin Functions", function () {
-    it("Should allow owner to update default PET logo URI", async function () {
-      const newLogoURI = "ipfs://newlogo456";
-      
-      await factory.connect(ownerSigner).setDefaultPETLogoURI(newLogoURI);
-      expect(await factory.defaultPETLogoURI()).to.equal(newLogoURI);
-    });
-
-    it("Should revert if non-owner tries to update default logo", async function () {
-      await expect(
-        factory.connect(user1).setDefaultPETLogoURI("ipfs://unauthorized")
-      ).to.be.revertedWith("Not owner");
-    });
-
-    it("Should allow owner to update treasury", async function () {
-      const newTreasury = user2.address;
-      
-      await factory.connect(ownerSigner).setTreasury(newTreasury);
-      expect(await factory.treasury()).to.equal(newTreasury);
-    });
-
-    it("Should revert if non-owner tries to update treasury", async function () {
-      await expect(
-        factory.connect(user1).setTreasury(user2.address)
-      ).to.be.revertedWith("Not owner");
+      await expect(factory.createVault(tokenC.target, tokenD.target))
+        .to.be.revertedWithCustomError(factory, "NoPriceSource");
     });
   });
 
   describe("View Functions", function () {
-    beforeEach(async function () {
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-    });
-
-    it("Should return vault address for pair", async function () {
-      const vaultAddress = await factory.getVaultForPair(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-      expect(vaultAddress).to.not.equal(ethers.ZeroAddress);
+    it("Should get vault for pair", async function () {
+      const { factory, tokenA, tokenB } = await loadFixture(deployFactoryFixture);
+      
+      await factory.createVault(tokenA.target, tokenB.target);
+      
+      const vault1 = await factory.getVaultForPair(tokenA.target, tokenB.target);
+      const vault2 = await factory.getVaultForPair(tokenB.target, tokenA.target);
+      
+      expect(vault1).to.equal(vault2);
+      expect(vault1).to.not.equal(ethers.ZeroAddress);
     });
 
     it("Should check if vault exists", async function () {
-      expect(await factory.vaultExists(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      )).to.be.true;
+      const { factory, tokenA, tokenB } = await loadFixture(deployFactoryFixture);
       
-      const tokenC = await ethers.deployContract("MockERC20", ["Token C", "TKC", 18]);
-      expect(await factory.vaultExists(
-        await tokenA.getAddress(),
-        await tokenC.getAddress()
-      )).to.be.false;
-    });
-
-    it("Should return all vaults", async function () {
-      const allVaults = await factory.getAllVaults();
-      expect(allVaults.length).to.equal(1);
+      expect(await factory.vaultExists(tokenA.target, tokenB.target)).to.be.false;
       
-      // Create another vault
-      const tokenC = await ethers.deployContract("MockERC20", ["Token C", "TKC", 18]);
-      await mockOracle.setPrice(await tokenC.getAddress(), PRICE_TOKEN_A);
+      await factory.createVault(tokenA.target, tokenB.target);
       
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenC.getAddress()
-      );
-      
-      const allVaultsAfter = await factory.getAllVaults();
-      expect(allVaultsAfter.length).to.equal(2);
-    });
-
-    it("Should return vault details", async function () {
-      const vaultAddress = await factory.getVaultForPair(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
-      
-      const details = await factory.getVaultDetails(vaultAddress);
-      expect(details.petToken).to.not.equal(ethers.ZeroAddress);
-      expect(details.token0.toLowerCase()).to.equal(
-        (await tokenA.getAddress()).toLowerCase()
-      );
-      expect(details.token1.toLowerCase()).to.equal(
-        (await tokenB.getAddress()).toLowerCase()
-      );
-      expect(details.createdAt).to.be.gt(0);
-      expect(details.creator.toLowerCase()).to.equal(user1.address.toLowerCase());
+      expect(await factory.vaultExists(tokenA.target, tokenB.target)).to.be.true;
     });
   });
 
-  describe("PET Token Functionality", function () {
-    let vaultAddress: string;
-    let petToken: any;
-
-    beforeEach(async function () {
-      await factory.connect(user1).createVault(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
+  describe("Owner Functions", function () {
+    it("Should update default PET logo URI", async function () {
+      const { factory } = await loadFixture(deployFactoryFixture);
       
-      vaultAddress = await factory.getVaultForPair(
-        await tokenA.getAddress(),
-        await tokenB.getAddress()
-      );
+      const newLogoURI = "ipfs://newlogo";
+      await expect(factory.setDefaultPETLogoURI(newLogoURI))
+        .to.emit(factory, "DefaultLogoUpdated")
+        .withArgs(newLogoURI);
       
-      const vaultInfo = await factory.getVaultDetails(vaultAddress);
-      petToken = await ethers.getContractAt("PETToken", vaultInfo.petToken);
+      expect(await factory.defaultPETLogoURI()).to.equal(newLogoURI);
     });
 
-    it("Should have correct PET token name and symbol", async function () {
-      const name = await petToken.name();
-      const symbol = await petToken.symbol();
+    it("Should revert when non-owner tries to update logo", async function () {
+      const { factory, user1 } = await loadFixture(deployFactoryFixture);
       
-      expect(name).to.include("PET-");
-      expect(name).to.include("TKA");
-      expect(name).to.include("TKB");
-      expect(symbol).to.include("PET-");
-    });
-
-    it("Should have 18 decimals", async function () {
-      expect(await petToken.decimals()).to.equal(18);
-    });
-
-    it("Should allow transfer of PET tokens", async function () {
-      // First deposit to get some PET tokens
-      const depositAmount = 1000n * 10n ** 18n;
-      const vault = await ethers.getContractAt("UniversalPairVault", vaultAddress);
-      
-      await cfxToken.connect(user1).approve(vaultAddress, depositAmount);
-      await vault.connect(user1).deposit(depositAmount, 0);
-      
-      const petBalance = await petToken.balanceOf(user1.address);
-      const transferAmount = petBalance / 2n;
-      
-      await petToken.connect(user1).transfer(user2.address, transferAmount);
-      
-      expect(await petToken.balanceOf(user2.address)).to.equal(transferAmount);
+      await expect(
+        factory.connect(user1).setDefaultPETLogoURI("ipfs://newlogo")
+      ).to.be.revertedWithCustomError(factory, "Unauthorized");
     });
   });
 });

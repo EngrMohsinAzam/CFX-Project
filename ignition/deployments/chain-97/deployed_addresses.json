@@ -1,6 +1,0 @@
-{
-  "CFXTokenModule#CFXToken": "0xe63718fD395564b87B310cD3e374ca554BaF5F55",
-  "MultiTokenPriceOracleModule#MultiTokenPriceOracle": "0xf5325f13ae99ad6F1Aa346a12aD1cae63292F1dD",
-  "PairVaultCloneableModule#PairVaultCloneable": "0x5e035E06a86612b17A9800bF5865B01028980E3e",
-  "PairVaultFactoryCloneModule#PairVaultFactoryClone": "0x20088414b621FB029eE10cc3B5273f2D25F76feD"
-}

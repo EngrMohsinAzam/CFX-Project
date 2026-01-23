@@ -1,0 +1,39 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-6e6e6d9a6c43a9b11866bac1ccd92b5eb39f9a7d",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "userSourceNameMap": {
+    "contracts/PairVaultFactory.sol": "project/contracts/PairVaultFactory.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode",
+            "evm.deployedBytecode",
+            "evm.methodIdentifiers",
+            "metadata"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/PairVaultFactory.sol": {
+        "content": "// SPDX-License-Identifier: MIT\r\npragma solidity ^0.8.20;\r\n\r\n/**\r\n * @title PairVaultFactory\r\n * @notice Simplified factory for XRPL EVM - Gas optimized\r\n */\r\n\r\ninterface IPETToken {\r\n    function initialize(\r\n        string memory _name, \r\n        string memory _symbol,\r\n        address _vault,\r\n        string memory _logoURI\r\n    ) external;\r\n}\r\n\r\ninterface IUniversalPairVault {\r\n    function initialize(\r\n        address _cfxToken,\r\n        address _petToken,\r\n        address _token0,\r\n        address _token1,\r\n        address _oracle,\r\n        address _owner\r\n    ) external;\r\n}\r\n\r\ninterface IOracle {\r\n    function hasPrice(address token) external view returns (bool);\r\n}\r\n\r\ncontract PairVaultFactory {\r\n    address public immutable cfxToken;\r\n    address public immutable oracle;\r\n    address public immutable owner;\r\n    address public immutable petTokenImplementation;\r\n    address public immutable vaultImplementation;\r\n    \r\n    string public defaultPETLogoURI;\r\n    \r\n    mapping(address => mapping(address => address)) public getVault;\r\n    address[] public allVaults;\r\n    \r\n    event VaultCreated(\r\n        address indexed token0,\r\n        address indexed token1,\r\n        address vault,\r\n        address petToken,\r\n        uint256 vaultId\r\n    );\r\n    \r\n    // ⭐ SIMPLIFIED: Minimal constructor\r\n    constructor(\r\n        address _cfxToken, \r\n        address _oracle,\r\n        address _petTokenImpl,\r\n        address _vaultImpl\r\n    ) {\r\n        require(_cfxToken != address(0), \"Zero CFX\");\r\n        require(_oracle != address(0), \"Zero oracle\");\r\n        require(_petTokenImpl != address(0), \"Zero PET\");\r\n        require(_vaultImpl != address(0), \"Zero vault\");\r\n        \r\n        cfxToken = _cfxToken;\r\n        oracle = _oracle;\r\n        petTokenImplementation = _petTokenImpl;\r\n        vaultImplementation = _vaultImpl;\r\n        owner = 0x5E66Dd4d6FCce965E8F55Cc0D8749badA0D9a329;\r\n        defaultPETLogoURI = \"\"; // Set later\r\n    }\r\n    \r\n    // ⭐ Set logo after deployment\r\n    function setDefaultPETLogoURI(string memory _logoURI) external {\r\n        require(msg.sender == owner, \"Not owner\");\r\n        defaultPETLogoURI = _logoURI;\r\n    }\r\n    \r\n    function createVault(address tokenA, address tokenB) \r\n        external \r\n        returns (address vault) \r\n    {\r\n        require(tokenA != tokenB, \"Same token\");\r\n        require(tokenA != address(0) && tokenB != address(0), \"Zero address\");\r\n        \r\n        (address token0, address token1) = tokenA < tokenB \r\n            ? (tokenA, tokenB) \r\n            : (tokenB, tokenA);\r\n        \r\n        require(getVault[token0][token1] == address(0), \"Vault exists\");\r\n        require(IOracle(oracle).hasPrice(token0), \"No price token0\");\r\n        require(IOracle(oracle).hasPrice(token1), \"No price token1\");\r\n        \r\n        // Clone contracts\r\n        address petToken = _clone(petTokenImplementation);\r\n        vault = _clone(vaultImplementation);\r\n        \r\n        // Initialize PET Token (simplified name)\r\n        IPETToken(petToken).initialize(\r\n            \"PET Token\",\r\n            \"PET\",\r\n            vault,\r\n            defaultPETLogoURI\r\n        );\r\n        \r\n        // Initialize Vault\r\n        IUniversalPairVault(vault).initialize(\r\n            cfxToken,\r\n            petToken,\r\n            token0,\r\n            token1,\r\n            oracle,\r\n            owner\r\n        );\r\n        \r\n        // Store vault\r\n        getVault[token0][token1] = vault;\r\n        getVault[token1][token0] = vault;\r\n        allVaults.push(vault);\r\n        \r\n        emit VaultCreated(token0, token1, vault, petToken, allVaults.length - 1);\r\n    }\r\n    \r\n    // ⭐ Minimal clone function\r\n    function _clone(address implementation) internal returns (address instance) {\r\n        assembly {\r\n            let ptr := mload(0x40)\r\n            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)\r\n            mstore(add(ptr, 0x14), shl(0x60, implementation))\r\n            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)\r\n            instance := create(0, ptr, 0x37)\r\n        }\r\n        require(instance != address(0), \"Clone failed\");\r\n    }\r\n    \r\n    // ⭐ Essential view functions only\r\n    function getVaultForPair(address tokenA, address tokenB) \r\n        external \r\n        view \r\n        returns (address) \r\n    {\r\n        (address token0, address token1) = tokenA < tokenB \r\n            ? (tokenA, tokenB) \r\n            : (tokenB, tokenA);\r\n        return getVault[token0][token1];\r\n    }\r\n    \r\n    function allVaultsLength() external view returns (uint256) {\r\n        return allVaults.length;\r\n    }\r\n}"
+      }
+    }
+  }
+}

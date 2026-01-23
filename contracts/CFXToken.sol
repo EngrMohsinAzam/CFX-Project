@@ -6,60 +6,35 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title CFXToken
- * @dev Base currency token for CFX Pair Investment Platform
- * Simple fixed supply token with IPFS logo support - optimized for gas efficiency
+ * @dev Mintable token - deploy lightweight, mint in batches
  */
 contract CFXToken is ERC20, Ownable {
     
-    // Total supply: 20 billion CFX tokens
-    uint256 private constant INITIAL_SUPPLY = 20_000_000_000 * 10**18;
+    uint256 public constant MAX_SUPPLY = 10_000_000_000 * 10**18; // 10B cap
     
-    // ⭐ NEW: Logo URI for MetaMask/wallets
-    string public logoURI;
-    
-    // Events
     event TokensBurned(address indexed from, uint256 amount);
-    event LogoURIUpdated(string newLogoURI);
+    event TokensMinted(address indexed to, uint256 amount);
     
-    /**
-     * @dev Constructor
-     * Mints initial supply to specified owner address
-     * Owner will transfer tokens to CFXSwap contract
-     * @param _logoURI IPFS hash for token logo (e.g., "ipfs://QmXxxx...")
-     */
-    constructor(string memory _logoURI) ERC20("CFX Token", "CFX") Ownable(0x5E66Dd4d6FCce965E8F55Cc0D8749badA0D9a329) {
-        _mint(0x5E66Dd4d6FCce965E8F55Cc0D8749badA0D9a329, INITIAL_SUPPLY);
-        logoURI = _logoURI;  // ← Store logo from Pinata
+    constructor() ERC20("CFX Token", "CFX") Ownable(0x5E66Dd4d6FCce965E8F55Cc0D8749badA0D9a329) {
+        // Deploy empty - mint later in batches
     }
     
     /**
-     * @dev Burns tokens from caller's balance
-     * Users can burn their own tokens if needed
-     * @param amount Amount of tokens to burn
+     * @dev Owner can mint tokens up to MAX_SUPPLY
+     * Mint in batches like 1B at a time to avoid gas issues
      */
+    function mint(address to, uint256 amount) external onlyOwner {
+        require(totalSupply() + amount <= MAX_SUPPLY, "Exceeds max supply");
+        _mint(to, amount);
+        emit TokensMinted(to, amount);
+    }
+    
     function burn(uint256 amount) external {
-        require(amount > 0, "Amount must be greater than 0");
-        require(balanceOf(msg.sender) >= amount, "Insufficient balance");
-        
         _burn(msg.sender, amount);
         emit TokensBurned(msg.sender, amount);
     }
     
-    /**
-     * @dev Returns the total supply cap
-     * @return uint256 Maximum token supply
-     */
     function cap() external pure returns (uint256) {
-        return INITIAL_SUPPLY;
-    }
-    
-    /**
-     * @dev Update logo URI (only owner)
-     * Useful if you need to change logo or move to different IPFS gateway
-     * @param _logoURI New IPFS hash
-     */
-    function setLogoURI(string memory _logoURI) external onlyOwner {
-        logoURI = _logoURI;
-        emit LogoURIUpdated(_logoURI);
+        return MAX_SUPPLY;
     }
 }

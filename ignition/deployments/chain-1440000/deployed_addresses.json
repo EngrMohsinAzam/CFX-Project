@@ -1,0 +1,7 @@
+{
+  "PairVaultFactoryModule#CFXToken": "0xe63718fD395564b87B310cD3e374ca554BaF5F55",
+  "PairVaultFactoryModule#PETToken": "0xDf983ADa4Cf693C3b8fba5F1a2AD1f6fa4d44De6",
+  "PairVaultFactoryModule#SimpleOracleRouter": "0x5e4724CfC90e327de28d570d38550AE4c87C1392",
+  "PairVaultFactoryModule#UniversalPairVault": "0x30C89cfae115d65f309A63f8D18Ad4eC6708F2F9",
+  "PairVaultFactoryModule#PairVaultFactory": "0x6B5a89f8EFf29403Af6237BD3C9960865B6a9C16"
+}

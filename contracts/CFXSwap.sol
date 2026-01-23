@@ -7,90 +7,94 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title CFXSwap
- * @dev Bidirectional swap: USDT ⇄ CFX
- * Gas optimized, secure, simple
+ * @dev Buy CFX with native XRP (XRPL EVM main currency)
+ * Fixed Rate: 1 XRP = 1 CFX
  */
 contract CFXSwap is Ownable, ReentrancyGuard {
     
     IERC20 public immutable cfxToken;
-    IERC20 public immutable usdtToken;
     
-    uint256 public exchangeRate = 1e18; // 1 USDT = 1 CFX
-    uint256 public minSwapAmount = 1e6; // 1 USDT minimum
+    uint256 public xrpPerCFX = 1 ether; // Fixed: 1 XRP = 1 CFX
+    uint256 public minSwapAmount = 0.01 ether; // Minimum: 0.01 XRP
     
-    event Swapped(address indexed user, bool isBuy, uint256 amountIn, uint256 amountOut);
-    event RateUpdated(uint256 newRate);
+    event TokensPurchased(address indexed buyer, uint256 xrpAmount, uint256 cfxAmount);
+    event PriceUpdated(uint256 newPrice);
     
-    constructor(address _cfxToken, address _usdtToken) Ownable(0x5E66Dd4d6FCce965E8F55Cc0D8749badA0D9a329) {
-        require(_cfxToken != address(0) && _usdtToken != address(0), "Invalid address");
+    constructor(address _cfxToken) Ownable(0x5E66Dd4d6FCce965E8F55Cc0D8749badA0D9a329) {
+        require(_cfxToken != address(0), "Invalid address");
         cfxToken = IERC20(_cfxToken);
-        usdtToken = IERC20(_usdtToken);
     }
     
     /**
-     * @dev Buy CFX with USDT
-     * @param usdtAmount USDT amount (6 decimals)
+     * @dev Buy CFX with native XRP
+     * Send XRP → Get equal amount of CFX (1:1 ratio)
      */
-    function buyCFX(uint256 usdtAmount) external nonReentrant {
-        require(usdtAmount >= minSwapAmount, "Below minimum");
+    function buyCFX() external payable nonReentrant {
+        require(msg.value >= minSwapAmount, "Below minimum");
         
-        uint256 cfxAmount = (usdtAmount * 1e12 * exchangeRate) / 1e18;
-        require(cfxAmount > 0, "Amount too small");
+        // 1 XRP = 1 CFX (both 18 decimals)
+        uint256 cfxAmount = (msg.value * 1e18) / xrpPerCFX;
         require(cfxToken.balanceOf(address(this)) >= cfxAmount, "Insufficient CFX");
         
-        usdtToken.transferFrom(msg.sender, address(this), usdtAmount);
         cfxToken.transfer(msg.sender, cfxAmount);
-        
-        emit Swapped(msg.sender, true, usdtAmount, cfxAmount);
+        emit TokensPurchased(msg.sender, msg.value, cfxAmount);
     }
     
     /**
-     * @dev Sell CFX for USDT
-     * @param cfxAmount CFX amount (18 decimals)
+     * @dev Calculate CFX output for given XRP amount
      */
-    function sellCFX(uint256 cfxAmount) external nonReentrant {
-        require(cfxAmount > 0, "Zero amount");
-        
-        uint256 usdtAmount = (cfxAmount * exchangeRate) / 1e30; // 1e18 * 1e12
-        require(usdtAmount >= minSwapAmount, "Below minimum");
-        require(usdtToken.balanceOf(address(this)) >= usdtAmount, "Insufficient USDT");
-        
-        cfxToken.transferFrom(msg.sender, address(this), cfxAmount);
-        usdtToken.transfer(msg.sender, usdtAmount);
-        
-        emit Swapped(msg.sender, false, cfxAmount, usdtAmount);
+    function calculateCFXOutput(uint256 xrpAmount) external view returns (uint256) {
+        return (xrpAmount * 1e18) / xrpPerCFX;
     }
     
     /**
-     * @dev Calculate outputs (view functions)
+     * @dev Owner: Update exchange rate if needed
      */
-    function getBuyOutput(uint256 usdtAmount) external view returns (uint256) {
-        return (usdtAmount * 1e12 * exchangeRate) / 1e18;
-    }
-    
-    function getSellOutput(uint256 cfxAmount) external view returns (uint256) {
-        return (cfxAmount * exchangeRate) / 1e30;
+    function setXRPPrice(uint256 newPrice) external onlyOwner {
+        require(newPrice > 0, "Invalid price");
+        xrpPerCFX = newPrice;
+        emit PriceUpdated(newPrice);
     }
     
     /**
-     * @dev Owner functions
+     * @dev Owner: Update minimum swap amount
      */
-    function setExchangeRate(uint256 newRate) external onlyOwner {
-        require(newRate > 0, "Invalid rate");
-        exchangeRate = newRate;
-        emit RateUpdated(newRate);
-    }
-    
     function setMinSwapAmount(uint256 newMin) external onlyOwner {
         minSwapAmount = newMin;
     }
     
-    function withdraw(address token, uint256 amount) external onlyOwner {
-        IERC20(token).transfer(owner(), amount);
+    /**
+     * @dev Owner: Withdraw collected XRP
+     */
+    function withdrawXRP() external onlyOwner {
+        payable(owner()).transfer(address(this).balance);
     }
     
-    function getBalances() external view returns (uint256 cfx, uint256 usdt) {
-        cfx = cfxToken.balanceOf(address(this));
-        usdt = usdtToken.balanceOf(address(this));
+    /**
+     * @dev Owner: Withdraw unsold CFX
+     */
+    function withdrawCFX(uint256 amount) external onlyOwner {
+        cfxToken.transfer(owner(), amount);
     }
-} 
+    
+    /**
+     * @dev View contract balances
+     */
+    function getBalances() external view returns (uint256 cfx, uint256 xrp) {
+        cfx = cfxToken.balanceOf(address(this));
+        xrp = address(this).balance;
+    }
+    
+    /**
+     * @dev Receive function - auto buy when XRP sent directly
+     */
+    receive() external payable {
+        require(msg.value >= minSwapAmount, "Below minimum");
+        
+        uint256 cfxAmount = (msg.value * 1e18) / xrpPerCFX;
+        require(cfxToken.balanceOf(address(this)) >= cfxAmount, "Insufficient CFX");
+        
+        cfxToken.transfer(msg.sender, cfxAmount);
+        emit TokensPurchased(msg.sender, msg.value, cfxAmount);
+    }
+}

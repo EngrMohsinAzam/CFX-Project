@@ -1,0 +1,39 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-c604171aadbd9b3dfe060dd79489ab83d76074ec",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "userSourceNameMap": {
+    "contracts/PETToken.sol": "project/contracts/PETToken.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode",
+            "evm.deployedBytecode",
+            "evm.methodIdentifiers",
+            "metadata"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/PETToken.sol": {
+        "content": "// SPDX-License-Identifier: MIT\r\npragma solidity ^0.8.20;\r\n\r\n/**\r\n * @title PETToken\r\n * @notice ERC20 implementation for minimal proxy cloning\r\n * @dev DEPLOY THIS SECOND - This is the implementation contract\r\n */\r\n\r\ncontract PETToken {\r\n    string public name;\r\n    string public symbol;\r\n    uint8 public constant decimals = 18;\r\n    uint256 public totalSupply;\r\n    string public logoURI;\r\n    \r\n    mapping(address => uint256) public balanceOf;\r\n    mapping(address => mapping(address => uint256)) public allowance;\r\n    \r\n    address public vault;\r\n    bool private initialized;\r\n    \r\n    event Transfer(address indexed from, address indexed to, uint256 value);\r\n    event Approval(address indexed owner, address indexed spender, uint256 value);\r\n    \r\n    error AlreadyInitialized();\r\n    error Unauthorized();\r\n    \r\n    function initialize(\r\n        string memory _name, \r\n        string memory _symbol,\r\n        address _vault,\r\n        string memory _logoURI\r\n    ) external {\r\n        if (initialized) revert AlreadyInitialized();\r\n        initialized = true;\r\n        \r\n        name = _name;\r\n        symbol = _symbol;\r\n        vault = _vault;\r\n        logoURI = _logoURI;\r\n    }\r\n    \r\n    function transfer(address to, uint256 amount) external returns (bool) {\r\n        balanceOf[msg.sender] -= amount;\r\n        unchecked {\r\n            balanceOf[to] += amount;\r\n        }\r\n        emit Transfer(msg.sender, to, amount);\r\n        return true;\r\n    }\r\n    \r\n    function transferFrom(address from, address to, uint256 amount) external returns (bool) {\r\n        uint256 allowed = allowance[from][msg.sender];\r\n        if (allowed != type(uint256).max) {\r\n            allowance[from][msg.sender] = allowed - amount;\r\n        }\r\n        balanceOf[from] -= amount;\r\n        unchecked {\r\n            balanceOf[to] += amount;\r\n        }\r\n        emit Transfer(from, to, amount);\r\n        return true;\r\n    }\r\n    \r\n    function approve(address spender, uint256 amount) external returns (bool) {\r\n        allowance[msg.sender][spender] = amount;\r\n        emit Approval(msg.sender, spender, amount);\r\n        return true;\r\n    }\r\n    \r\n    function mint(address to, uint256 amount) external {\r\n        if (msg.sender != vault) revert Unauthorized();\r\n        unchecked {\r\n            totalSupply += amount;\r\n            balanceOf[to] += amount;\r\n        }\r\n        emit Transfer(address(0), to, amount);\r\n    }\r\n    \r\n    function burn(address from, uint256 amount) external {\r\n        if (msg.sender != vault) revert Unauthorized();\r\n        balanceOf[from] -= amount;\r\n        unchecked {\r\n            totalSupply -= amount;\r\n        }\r\n        emit Transfer(from, address(0), amount);\r\n    }\r\n}"
+      }
+    }
+  }
+}
